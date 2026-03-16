@@ -1,0 +1,6 @@
+.env
+.env.local
+.aws
+.ssh
+id_rsa
+id_ed25519

@@ -1,0 +1,20 @@
+[
+  {
+    "finding_id": "__FINDING_ID__",
+    "title": "__TITLE__",
+    "category": "__CATEGORY__",
+    "severity": "__SEVERITY__",
+    "confidence": "__CONFIDENCE__",
+    "status": "candidate",
+    "cwe": [],
+    "affected_routes": [],
+    "code_locations": [],
+    "hypothesis_id": "__HYPOTHESIS_ID__",
+    "payload_pack": "__PAYLOAD_PACK__",
+    "evidence_paths": [],
+    "expected_secure_behavior": "__EXPECTED_SECURE_BEHAVIOR__",
+    "observed_behavior": "__OBSERVED_BEHAVIOR__",
+    "impact": "__IMPACT__",
+    "suggested_fix": "__SUGGESTED_FIX__"
+  }
+]

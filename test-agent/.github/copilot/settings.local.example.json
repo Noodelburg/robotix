@@ -1,0 +1,13 @@
+{
+  "trusted_folders": [
+    "/workspaces/project"
+  ],
+  "allowed_urls": [
+    "https://staging.example.com",
+    "https://api.staging.example.com"
+  ],
+  "denied_urls": [
+    "https://prod.example.com",
+    "https://*.prod.example.com"
+  ]
+}

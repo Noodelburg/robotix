@@ -1,0 +1,14 @@
+diff --git a/calculator.py b/calculator.py
+index 1111111..2222222 100644
+--- a/calculator.py
++++ b/calculator.py
+@@ -1,7 +1,7 @@
+ def divide(total, count):
+-    if count == 0:
++    if count < 0:
+         return 0
+     return total / count
+ 
+ def print_name(data):
+-    print(data["name"])
++    eval("print(data['name'])")

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "toolchain/scripts/audit-log.sh",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

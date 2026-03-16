@@ -1,0 +1,4 @@
+{
+  "name": "security-toolchain-analysis",
+  "extends": "../devcontainer.json"
+}

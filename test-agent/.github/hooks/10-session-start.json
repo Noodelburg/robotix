@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "prompt",
+        "prompt": "Read toolchain/config/policy.yaml and the assigned run manifest before doing anything else. All active probes must target approved test environments and all artifacts must be written under toolchain/runs/."
+      }
+    ]
+  }
+}
