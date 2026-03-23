@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from poc import (
+
+
+from chunker import (
     DEFAULT_MAX_LINES,
     DEFAULT_OUTPUT_DIR,
     call_ai,
@@ -13,7 +15,7 @@ from poc import (
     write_outputs,
 )
 
-TARGET_DIRECTORY = r"C:\Users\attil\Desktop\robotix\mvp"
+TARGET_DIRECTORY = r"/some/dir"
 
 
 def main():
