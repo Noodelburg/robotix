@@ -4,7 +4,7 @@ from pathlib import Path
 from collections import defaultdict
 import logging
 
-from poc_prompts import build_chunk_plan_prompt
+from prompts import build_chunk_plan_prompt
 
 
 
