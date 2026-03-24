@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, logging
+import json, logging, re
 from collections import defaultdict
 from pathlib import Path
 
@@ -16,6 +16,8 @@ from prompts import build_validation_prompt
 
 DEFAULT_CHUNKS_DIR = DEFAULT_OUTPUT_DIR
 DEFAULT_REPORT_FILE = "validation.json"
+METADATA_START = "=== CHUNK METADATA START ==="
+METADATA_END = "=== CHUNK METADATA END ==="
 
 
 logging.basicConfig(
@@ -74,8 +76,19 @@ def load_manifest(chunks_dir: Path):
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def extract_chunk_metadata(chunk_document):
-    """Extract metadata from a structured chunk JSON document."""
+def extract_chunk_metadata(raw_content: str):
+    """Extract metadata from either a JSON chunk or a marker-based chunk file."""
+    try:
+        chunk_document = json.loads(raw_content)
+    except json.JSONDecodeError:
+        pattern = re.escape(METADATA_START) + r"\s*(\{.*?\})\s*" + re.escape(METADATA_END)
+        match = re.search(pattern, raw_content, re.S)
+
+        if not match:
+            raise ValueError("Missing metadata block.")
+
+        chunk_document = json.loads(match.group(1))
+
     return {
         "id": chunk_document.get("id"),
         "name": chunk_document.get("name"),
@@ -117,20 +130,18 @@ def load_chunk_artifacts(chunks_dir: Path, manifest):
             continue
 
         raw_content = chunk_file.read_text(encoding="utf-8", errors="ignore")
+        artifact["content"] = raw_content
 
         try:
-            chunk_document = json.loads(raw_content)
-            artifact["metadata"] = extract_chunk_metadata(chunk_document)
-            artifact["content"] = json.dumps(chunk_document, indent=2)
+            artifact["metadata"] = extract_chunk_metadata(raw_content)
         except Exception as exc:
             issues.append(
                 make_issue(
-                    f"Chunk JSON is unreadable: {chunk_file.name} ({exc})",
+                    f"Chunk metadata is unreadable: {chunk_file.name} ({exc})",
                     severity="high",
                     chunk_id=chunk.get("id"),
                 )
             )
-            artifact["content"] = raw_content
 
         artifacts.append(artifact)
 

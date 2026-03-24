@@ -64,10 +64,10 @@ TEXT_EXTS = {
     ".dockerfile",
 }
 BUILD_FILES = {"dockerfile", "makefile", "jenkinsfile"}
-CHUNK_FILE_PATTERN = "chunk-*.json"
-STALE_CHUNK_FILE_PATTERNS = (CHUNK_FILE_PATTERN, "chunk-*.txt")
+CHUNK_FILE_PATTERN = "chunk-*.txt"
+STALE_CHUNK_FILE_PATTERNS = (CHUNK_FILE_PATTERN, "chunk-*.json")
 CMD = "copilot -p"
-DEFAULT_MAX_LINES = 2000
+DEFAULT_MAX_LINES = 20000
 DEFAULT_OUTPUT_DIR = "chunks"
 
 
@@ -79,7 +79,12 @@ logging.basicConfig(
 
 
 def is_text(path: Path) -> bool:
-    return path.suffix.lower() in TEXT_EXTS or path.name.lower() in BUILD_FILES
+
+    if path.suffix.lower() in TEXT_EXTS or path.name.lower() in BUILD_FILES:
+        return True 
+    
+    logging.warning(f"Failed is_text: {path}")
+    return False
 
 
 def iterate_files(root: Path):
@@ -139,6 +144,11 @@ def inventory(root: Path):
             logging.error(f"Failed to process file in inventory: {path} | Error: {exc}")
 
     return items
+
+
+def prompt_for(items, max_lines):
+    """Build the chunk-planning prompt."""
+    return build_chunk_plan_prompt(items, max_lines)
 
 
 def call_ai(prompt: str):
@@ -255,7 +265,9 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
     metadata_by_path = {item["path"]: item for item in items}
     outdir.mkdir(parents=True, exist_ok=True)
 
-    delete_stale_chunk_files(outdir)
+    for pattern in STALE_CHUNK_FILE_PATTERNS:
+        for stale_file in outdir.glob(pattern):
+            stale_file.unlink()
 
     manifest = {
         "root": str(root.resolve()),
@@ -267,11 +279,37 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
 
     for chunk in plan["chunks"]:
         chunk_id = chunk["id"]
-        chunk_file = outdir / f"{chunk_id}.json"
+        chunk_file = outdir / f"{chunk_id}.txt"
         total_lines = sum(metadata_by_path[path]["lines"] for path in chunk["files"])
-        chunk_document = build_chunk_document(root, chunk, metadata_by_path, total_lines)
+        chunk_metadata = {
+            "id": chunk_id,
+            "name": chunk["name"],
+            "reason": chunk["reason"],
+            "total_lines": total_lines,
+            "files": [
+                {
+                    "path": path,
+                    "lines": metadata_by_path[path]["lines"],
+                }
+                for path in chunk["files"]
+            ],
+        }
 
-        chunk_file.write_text(json.dumps(chunk_document, indent=2), encoding="utf-8")
+        with chunk_file.open("w", encoding="utf-8") as output_file:
+            output_file.write("=== CHUNK METADATA START ===\n")
+            output_file.write(json.dumps(chunk_metadata, indent=2))
+            output_file.write("\n=== CHUNK METADATA END ===\n")
+
+            for relative_path in chunk["files"]:
+                file_path = root / relative_path
+                file_content = file_path.read_text(encoding="utf-8", errors="ignore")
+                output_file.write(f"\n=== FILE START: {relative_path} ===\n")
+                output_file.write(file_content)
+
+                if not file_content.endswith("\n"):
+                    output_file.write("\n")
+
+                output_file.write("=== FILE END ===\n")
 
         manifest["chunks"].append(
             {
@@ -289,35 +327,10 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
     return manifest
 
 
-def delete_stale_chunk_files(outdir: Path):
-    """Remove chunk files from previous runs."""
-    for pattern in STALE_CHUNK_FILE_PATTERNS:
-        for stale_file in outdir.glob(pattern):
-            stale_file.unlink()
-
-
-def build_chunk_document(root: Path, chunk, metadata_by_path, total_lines):
-    """Build the JSON payload written for a single chunk."""
-    return {
-        "id": chunk["id"],
-        "name": chunk["name"],
-        "reason": chunk["reason"],
-        "total_lines": total_lines,
-        "files": [
-            {
-                "path": path,
-                "lines": metadata_by_path[path]["lines"],
-                "content": (root / path).read_text(encoding="utf-8", errors="ignore"),
-            }
-            for path in chunk["files"]
-        ],
-    }
-
-
 def run_chunking(root: Path, outdir: Path, max_lines=DEFAULT_MAX_LINES):
     """Generate chunk files for the given directory."""
     items = inventory(root)
-    prompt = build_chunk_plan_prompt(items, max_lines)
+    prompt = prompt_for(items, max_lines)
     plan = call_ai(prompt) or fallback(items, max_lines)
     plan = normalize(plan, items, max_lines)
     manifest = write_outputs(root, outdir, plan, items, max_lines=max_lines)
