@@ -2,35 +2,23 @@
 
 from pathlib import Path
 
+from chunker import DEFAULT_MAX_LINES, DEFAULT_OUTPUT_DIR, run_chunking
+from validator import validate_chunks
 
-
-from chunker import (
-    DEFAULT_MAX_LINES,
-    DEFAULT_OUTPUT_DIR,
-    call_ai,
-    fallback,
-    inventory,
-    normalize,
-    prompt_for,
-    write_outputs,
-)
 
 TARGET_DIRECTORY = r"/some/dir"
 
 
 def main():
-    """Generate chunk files for the configured target directory."""
+    """Generate chunk files, then validate and correct them."""
     root = Path(TARGET_DIRECTORY)
     outdir = Path(DEFAULT_OUTPUT_DIR)
 
     if not root.exists():
         raise FileNotFoundError(f"Target directory does not exist: {root}")
 
-    items = inventory(root)
-    prompt = prompt_for(items, DEFAULT_MAX_LINES)
-    plan = call_ai(prompt) or fallback(items, DEFAULT_MAX_LINES)
-    plan = normalize(plan, items, DEFAULT_MAX_LINES)
-    write_outputs(root, outdir, plan, items)
+    run_chunking(root, outdir, DEFAULT_MAX_LINES)
+    validate_chunks(outdir)
 
 
 if __name__ == "__main__":

@@ -34,15 +34,29 @@ Files (path<TAB>lines<TAB>topdir):
 """
 
 
-def build_validation_prompt(manifest, chunks):
-    """Build the AI prompt used to validate chunking output."""
+def build_validation_prompt(
+    inventory_summary,
+    manifest_json,
+    audit_json,
+    chunk_metadata_json,
+    chunk_contents,
+):
+    """Build the AI prompt used to validate and correct chunk output."""
     return f"""Return ONLY JSON.
-Task: validate a codebase chunking job for deep review.
+Task: validate and, if necessary, minimally correct a chunking job produced by chunker.py.
 Goals:
-- check whether the manifest and chunk metadata are internally consistent
-- flag meaningful issues with chunk coherence, naming, or suspicious sizing
-- prefer concrete findings over vague criticism
-- if the job looks good, return an empty issues list and status "pass"
+- use the rebuilt repo inventory as ground truth
+- review the current chunk plan against the manifest, chunk metadata, and full chunk contents
+- flag missed files, duplicate assignments, oversized chunks, and clearly bad grouping
+- keep changes minimal and preserve existing chunk ids and names where possible
+- do not fully replan unless the current chunking is too broken to patch safely
+
+Rules:
+- Every file must be assigned exactly once in corrected_chunks if you return corrections.
+- If the current output is acceptable, return status "pass" and an empty corrected_chunks list.
+- If you make corrections, return the full corrected chunk plan in corrected_chunks.
+- Prefer fixing only the affected chunks over replacing the whole plan.
+- Return only JSON matching the schema below.
 
 JSON schema:
 {{
@@ -55,26 +69,44 @@ JSON schema:
       "message":"one sentence"
     }}
   ],
-  "recommendations":["short suggestion"]
+  "corrected_chunks":[
+    {{
+      "id":"chunk-0001",
+      "name":"short-stable-name",
+      "reason":"one sentence",
+      "files":["a","b"]
+    }}
+  ]
 }}
 
 Allowed status values:
 - "pass"
+- "corrected"
 - "needs_review"
-- "fail"
 
 Allowed severity values:
 - "low"
 - "medium"
 - "high"
 
-Manifest:
+Rebuilt inventory summary (path<TAB>lines<TAB>topdir):
+{inventory_summary}
+
+Deterministic audit findings:
 ```json
-{manifest}
+{audit_json}
 ```
 
-Chunk metadata:
+Current manifest:
 ```json
-{chunks}
+{manifest_json}
 ```
+
+Current chunk metadata:
+```json
+{chunk_metadata_json}
+```
+
+Current chunk files:
+{chunk_contents}
 """
