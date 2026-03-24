@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import json, logging, re, shlex, subprocess
+import json, logging
 from collections import defaultdict
 from pathlib import Path
 
 from chunker import (
     DEFAULT_MAX_LINES,
     DEFAULT_OUTPUT_DIR,
+    call_ai,
     inventory as build_inventory,
     normalize as normalize_chunk_plan,
     write_outputs,
@@ -13,11 +14,8 @@ from chunker import (
 from prompts import build_validation_prompt
 
 
-CMD = "copilot -p"
 DEFAULT_CHUNKS_DIR = DEFAULT_OUTPUT_DIR
 DEFAULT_REPORT_FILE = "validation.json"
-METADATA_START = "=== CHUNK METADATA START ==="
-METADATA_END = "=== CHUNK METADATA END ==="
 
 
 logging.basicConfig(
@@ -76,19 +74,25 @@ def load_manifest(chunks_dir: Path):
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def extract_chunk_metadata(content: str):
-    """Extract the metadata block from a chunk file."""
-    pattern = re.escape(METADATA_START) + r"\s*(\{.*?\})\s*" + re.escape(METADATA_END)
-    match = re.search(pattern, content, re.S)
-
-    if not match:
-        raise ValueError("Missing metadata block.")
-
-    return json.loads(match.group(1))
+def extract_chunk_metadata(chunk_document):
+    """Extract metadata from a structured chunk JSON document."""
+    return {
+        "id": chunk_document.get("id"),
+        "name": chunk_document.get("name"),
+        "reason": chunk_document.get("reason", ""),
+        "total_lines": chunk_document.get("total_lines", 0),
+        "files": [
+            {
+                "path": file_info.get("path"),
+                "lines": file_info.get("lines", 0),
+            }
+            for file_info in chunk_document.get("files", [])
+        ],
+    }
 
 
 def load_chunk_artifacts(chunks_dir: Path, manifest):
-    """Load chunk files, metadata, and raw contents."""
+    """Load chunk JSON files, metadata, and raw contents."""
     artifacts = []
     issues = []
 
@@ -97,7 +101,6 @@ def load_chunk_artifacts(chunks_dir: Path, manifest):
         artifact = {
             "id": chunk.get("id"),
             "file": chunk.get("file"),
-            "path": str(chunk_file),
             "content": "",
             "metadata": None,
         }
@@ -113,18 +116,21 @@ def load_chunk_artifacts(chunks_dir: Path, manifest):
             artifacts.append(artifact)
             continue
 
-        artifact["content"] = chunk_file.read_text(encoding="utf-8", errors="ignore")
+        raw_content = chunk_file.read_text(encoding="utf-8", errors="ignore")
 
         try:
-            artifact["metadata"] = extract_chunk_metadata(artifact["content"])
+            chunk_document = json.loads(raw_content)
+            artifact["metadata"] = extract_chunk_metadata(chunk_document)
+            artifact["content"] = json.dumps(chunk_document, indent=2)
         except Exception as exc:
             issues.append(
                 make_issue(
-                    f"Chunk metadata is unreadable: {chunk_file.name} ({exc})",
+                    f"Chunk JSON is unreadable: {chunk_file.name} ({exc})",
                     severity="high",
                     chunk_id=chunk.get("id"),
                 )
             )
+            artifact["content"] = raw_content
 
         artifacts.append(artifact)
 
@@ -279,39 +285,9 @@ def chunk_content_summary(artifacts):
     for artifact in artifacts:
         title = artifact.get("file") or artifact.get("id") or "unknown"
         content = artifact.get("content") or "[missing chunk file]"
-        sections.append(f"=== CHUNK FILE: {title} ===\n{content}")
+        sections.append(f"=== CHUNK JSON FILE: {title} ===\n{content}")
 
     return "\n\n".join(sections)
-
-
-def prompt_for(manifest, items, audit_issues, artifacts):
-    """Build the validation prompt."""
-    return build_validation_prompt(
-        inventory_summary=inventory_summary(items),
-        manifest_json=json.dumps(manifest, indent=2),
-        audit_json=json.dumps(audit_issues, indent=2),
-        chunk_metadata_json=chunk_metadata_summary(artifacts),
-        chunk_contents=chunk_content_summary(artifacts),
-    )
-
-
-def call_ai(prompt: str):
-    """Call Copilot CLI and return parsed JSON response."""
-    try:
-        cmd = shlex.split(CMD)
-        result = subprocess.run(cmd + [prompt], capture_output=True, text=True)
-        output = (result.stdout or result.stderr).strip()
-        match = re.search(r"\{.*\}", output, re.S)
-
-        if not match:
-            logging.error(f"No JSON in AI response:\n{output}")
-            return None
-
-        return json.loads(match.group(0))
-
-    except Exception as exc:
-        logging.error(f"call_ai failed: {exc}")
-        return None
 
 
 def fallback_report(audit_issues):
@@ -332,10 +308,10 @@ def fallback_report(audit_issues):
     }
 
 
-def normalize_ai_report(report):
+def normalize_ai_report(report, fallback_issues):
     """Normalize the AI response into a stable correction-aware shape."""
     if not isinstance(report, dict):
-        return fallback_report([])
+        return fallback_report(fallback_issues)
 
     status = report.get("status", "needs_review")
     if status not in {"pass", "corrected", "needs_review"}:
@@ -418,9 +394,19 @@ def validate_chunks(chunks_dir: Path):
     artifacts, artifact_issues = load_chunk_artifacts(chunks_dir, manifest)
     audit_issues = merge_issues(artifact_issues, audit_chunk_output(manifest, artifacts, items))
 
-    ai_prompt = prompt_for(manifest, items, audit_issues, artifacts)
+    ai_prompt = build_validation_prompt(
+        inventory_summary=inventory_summary(items),
+        manifest_json=json.dumps(manifest, indent=2),
+        audit_json=json.dumps(audit_issues, indent=2),
+        chunk_metadata_json=chunk_metadata_summary(artifacts),
+        chunk_contents=chunk_content_summary(artifacts),
+    )
     ai_report = call_ai(ai_prompt)
-    normalized_ai_report = normalize_ai_report(ai_report) if ai_report else fallback_report(audit_issues)
+    normalized_ai_report = (
+        normalize_ai_report(ai_report, audit_issues)
+        if ai_report
+        else fallback_report(audit_issues)
+    )
 
     original_plan = plan_from_manifest(manifest)
     corrected_plan = None

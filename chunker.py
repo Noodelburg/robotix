@@ -64,7 +64,8 @@ TEXT_EXTS = {
     ".dockerfile",
 }
 BUILD_FILES = {"dockerfile", "makefile", "jenkinsfile"}
-CHUNK_FILE_PATTERN = "chunk-*.txt"
+CHUNK_FILE_PATTERN = "chunk-*.json"
+STALE_CHUNK_FILE_PATTERNS = (CHUNK_FILE_PATTERN, "chunk-*.txt")
 CMD = "copilot -p"
 DEFAULT_MAX_LINES = 2000
 DEFAULT_OUTPUT_DIR = "chunks"
@@ -138,11 +139,6 @@ def inventory(root: Path):
             logging.error(f"Failed to process file in inventory: {path} | Error: {exc}")
 
     return items
-
-
-def prompt_for(items, max_lines):
-    """Build the chunk-planning prompt."""
-    return build_chunk_plan_prompt(items, max_lines)
 
 
 def call_ai(prompt: str):
@@ -259,8 +255,7 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
     metadata_by_path = {item["path"]: item for item in items}
     outdir.mkdir(parents=True, exist_ok=True)
 
-    for stale_file in outdir.glob(CHUNK_FILE_PATTERN):
-        stale_file.unlink()
+    delete_stale_chunk_files(outdir)
 
     manifest = {
         "root": str(root.resolve()),
@@ -272,37 +267,11 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
 
     for chunk in plan["chunks"]:
         chunk_id = chunk["id"]
-        chunk_file = outdir / f"{chunk_id}.txt"
+        chunk_file = outdir / f"{chunk_id}.json"
         total_lines = sum(metadata_by_path[path]["lines"] for path in chunk["files"])
-        chunk_metadata = {
-            "id": chunk_id,
-            "name": chunk["name"],
-            "reason": chunk["reason"],
-            "total_lines": total_lines,
-            "files": [
-                {
-                    "path": path,
-                    "lines": metadata_by_path[path]["lines"],
-                }
-                for path in chunk["files"]
-            ],
-        }
+        chunk_document = build_chunk_document(root, chunk, metadata_by_path, total_lines)
 
-        with chunk_file.open("w", encoding="utf-8") as output_file:
-            output_file.write("=== CHUNK METADATA START ===\n")
-            output_file.write(json.dumps(chunk_metadata, indent=2))
-            output_file.write("\n=== CHUNK METADATA END ===\n")
-
-            for relative_path in chunk["files"]:
-                file_path = root / relative_path
-                file_content = file_path.read_text(encoding="utf-8", errors="ignore")
-                output_file.write(f"\n=== FILE START: {relative_path} ===\n")
-                output_file.write(file_content)
-
-                if not file_content.endswith("\n"):
-                    output_file.write("\n")
-
-                output_file.write("=== FILE END ===\n")
+        chunk_file.write_text(json.dumps(chunk_document, indent=2), encoding="utf-8")
 
         manifest["chunks"].append(
             {
@@ -320,10 +289,35 @@ def write_outputs(root: Path, outdir: Path, plan, items, max_lines=DEFAULT_MAX_L
     return manifest
 
 
+def delete_stale_chunk_files(outdir: Path):
+    """Remove chunk files from previous runs."""
+    for pattern in STALE_CHUNK_FILE_PATTERNS:
+        for stale_file in outdir.glob(pattern):
+            stale_file.unlink()
+
+
+def build_chunk_document(root: Path, chunk, metadata_by_path, total_lines):
+    """Build the JSON payload written for a single chunk."""
+    return {
+        "id": chunk["id"],
+        "name": chunk["name"],
+        "reason": chunk["reason"],
+        "total_lines": total_lines,
+        "files": [
+            {
+                "path": path,
+                "lines": metadata_by_path[path]["lines"],
+                "content": (root / path).read_text(encoding="utf-8", errors="ignore"),
+            }
+            for path in chunk["files"]
+        ],
+    }
+
+
 def run_chunking(root: Path, outdir: Path, max_lines=DEFAULT_MAX_LINES):
     """Generate chunk files for the given directory."""
     items = inventory(root)
-    prompt = prompt_for(items, max_lines)
+    prompt = build_chunk_plan_prompt(items, max_lines)
     plan = call_ai(prompt) or fallback(items, max_lines)
     plan = normalize(plan, items, max_lines)
     manifest = write_outputs(root, outdir, plan, items, max_lines=max_lines)

@@ -107,6 +107,6 @@ Current chunk metadata:
 {chunk_metadata_json}
 ```
 
-Current chunk files:
+Current chunk JSON files:
 {chunk_contents}
 """
