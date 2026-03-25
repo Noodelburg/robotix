@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone repository understanding worker."""
+"""Standalone repository mapper."""
 
 import argparse
 import json
@@ -10,8 +10,8 @@ import subprocess
 from pathlib import Path
 
 from prompts import (
-    build_repository_understanding_chunk_prompt,
-    build_repository_understanding_merge_prompt,
+    build_mapper_chunk_prompt,
+    build_mapper_merge_prompt,
 )
 
 
@@ -772,7 +772,7 @@ def collect_chunk_fragment(root_path: Path, chunk):
             "coverage_gaps": dedupe_coverage_gaps(coverage_gaps),
         }, problems
 
-    prompt = build_repository_understanding_chunk_prompt(
+    prompt = build_mapper_chunk_prompt(
         chunk_json=json.dumps(chunk, indent=2),
         chunk_contents=chunk_contents,
     )
@@ -805,7 +805,7 @@ def collect_chunk_fragment(root_path: Path, chunk):
 
 def synthesize_repository_map(merged_map, coverage_gaps, allowed_chunk_ids, allowed_paths):
     """Run the final synthesis pass over the deterministic merged map."""
-    prompt = build_repository_understanding_merge_prompt(
+    prompt = build_mapper_merge_prompt(
         merged_map_json=json.dumps(merged_map, indent=2),
         coverage_gaps_json=json.dumps(coverage_gaps, indent=2),
     )
@@ -877,8 +877,8 @@ def build_output(status, summary, root_path, chunks, system_map, coverage_gaps):
     }
 
 
-def run_repository_understanding(input_json_path, output_json_path=None):
-    """Run repository understanding from a single input JSON file."""
+def run_mapper(input_json_path, output_json_path=None):
+    """Run the repository mapper from a single input JSON file."""
     input_path = Path(input_json_path).resolve()
     output_path = (
         Path(output_json_path).resolve()
@@ -979,7 +979,7 @@ def main():
         help="Optional explicit output path. Defaults to repository-understanding.json next to the input file.",
     )
     args = parser.parse_args()
-    run_repository_understanding(args.input_json, args.output_json)
+    run_mapper(args.input_json, args.output_json)
 
 
 if __name__ == "__main__":

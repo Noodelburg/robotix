@@ -112,7 +112,7 @@ Current chunk JSON files:
 """
 
 
-def build_repository_understanding_chunk_prompt(chunk_json, chunk_contents):
+def build_mapper_chunk_prompt(chunk_json, chunk_contents):
     """Build the AI prompt for chunk-local repository understanding."""
     return f"""Return ONLY JSON.
 Task: build a chunk-local repository understanding map for downstream review context.
@@ -251,7 +251,7 @@ Chunk contents:
 """
 
 
-def build_repository_understanding_merge_prompt(merged_map_json, coverage_gaps_json):
+def build_mapper_merge_prompt(merged_map_json, coverage_gaps_json):
     """Build the AI prompt for repository-wide map consolidation."""
     return f"""Return ONLY JSON.
 Task: consolidate a repository-wide system map for downstream review context.
@@ -301,7 +301,7 @@ Coverage gaps:
 """
 
 
-def build_repository_understanding_validation_prompt(
+def build_mapper_validation_prompt(
     input_json,
     audit_json,
     current_output_json,
@@ -309,7 +309,7 @@ def build_repository_understanding_validation_prompt(
 ):
     """Build the AI prompt for repository-understanding validation and correction."""
     return f"""Return ONLY JSON.
-Task: validate and, if necessary, minimally correct a repository-understanding output produced by repository_understanding_worker.py.
+Task: validate and, if necessary, minimally correct a repository-understanding output produced by mapper.py.
 
 Goals:
 - use the repository-understanding input JSON as ground truth for valid chunk ids and file paths
