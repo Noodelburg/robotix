@@ -110,3 +110,283 @@ Current chunk metadata:
 Current chunk JSON files:
 {chunk_contents}
 """
+
+
+def build_repository_understanding_chunk_prompt(chunk_json, chunk_contents):
+    """Build the AI prompt for chunk-local repository understanding."""
+    return f"""Return ONLY JSON.
+Task: build a chunk-local repository understanding map for downstream review context.
+Focus ONLY on these categories:
+- entrypoints
+- trust_boundaries
+- identity_and_privilege_zones
+- data_stores
+- external_integrations
+- sensitive_operations
+
+Rules:
+- Only include entities supported by the provided chunk metadata and file contents.
+- Prefer grounded, high-signal entities over speculative guesses.
+- This worker creates architectural context only. It must not identify vulnerabilities, findings, attack paths, missing controls, insecure behavior, or exploitability.
+- Describe what exists and how it is connected, not whether it is safe or unsafe.
+- For sensitive_operations, describe privileged or high-impact operations neutrally; do not explain how they could be abused.
+- Every emitted item must include evidence with chunk_id, files, and rationale.
+- Evidence files must be repo-relative paths from the chunk metadata.
+- If the chunk does not support an item in a category, return an empty list for that category.
+- You may return coverage gaps for areas that appear relevant but remain unclear from this chunk alone.
+- Do not invent line numbers, services, data stores, privileges, or integrations not visible in the material.
+- Use neutral, architectural language in names, summaries, and evidence rationales.
+
+JSON schema:
+{{
+  "summary":"one sentence",
+  "system_map":{{
+    "entrypoints":[
+      {{
+        "name":"admin API",
+        "kind":"http",
+        "summary":"what enters here",
+        "inputs":["request body","headers"],
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/routes/admin.py"],
+            "rationale":"route registration and handler logic"
+          }}
+        ]
+      }}
+    ],
+    "trust_boundaries":[
+      {{
+        "name":"public request to app server",
+        "source_zone":"untrusted client",
+        "destination_zone":"application",
+        "summary":"boundary description",
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/routes/admin.py"],
+            "rationale":"request handlers accept external input"
+          }}
+        ]
+      }}
+    ],
+    "identity_and_privilege_zones":[
+      {{
+        "name":"admin users",
+        "actors":["admin"],
+        "privileges":["manage tenants"],
+        "summary":"role or privilege zone",
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/authz.py"],
+            "rationale":"authorization checks reference admin role"
+          }}
+        ]
+      }}
+    ],
+    "data_stores":[
+      {{
+        "name":"primary postgres",
+        "kind":"sql",
+        "summary":"stored data and purpose",
+        "data_types":["accounts","tokens"],
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/models.py"],
+            "rationale":"database models and queries show persisted data"
+          }}
+        ]
+      }}
+    ],
+    "external_integrations":[
+      {{
+        "name":"Stripe API",
+        "kind":"http",
+        "direction":"outbound",
+        "summary":"integration purpose",
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/billing.py"],
+            "rationale":"outbound client calls to Stripe"
+          }}
+        ]
+      }}
+    ],
+    "sensitive_operations":[
+      {{
+        "name":"tenant deletion",
+        "kind":"admin-action",
+        "required_privilege":"admin",
+        "summary":"why the operation is sensitive",
+        "evidence":[
+          {{
+            "chunk_id":"chunk-0001",
+            "files":["src/admin.py"],
+            "rationale":"handler performs destructive tenant management"
+          }}
+        ]
+      }}
+    ]
+  }},
+  "coverage_gaps":[
+    {{
+      "category":"entrypoints",
+      "summary":"what remains unclear from this chunk",
+      "chunk_ids":["chunk-0001"]
+    }}
+  ]
+}}
+
+Chunk metadata:
+```json
+{chunk_json}
+```
+
+Chunk contents:
+{chunk_contents}
+"""
+
+
+def build_repository_understanding_merge_prompt(merged_map_json, coverage_gaps_json):
+    """Build the AI prompt for repository-wide map consolidation."""
+    return f"""Return ONLY JSON.
+Task: consolidate a repository-wide system map for downstream review context.
+
+You are given a deterministic merged map assembled from chunk-local outputs.
+Your job is to improve naming consistency and collapse duplicates while staying evidence-first.
+
+Rules:
+- Do not invent new entities, evidence, privileges, data stores, or integrations.
+- Only merge or rename entities that are already present in the input.
+- Preserve or combine evidence from the input items you merge.
+- Keep all six categories present even if some are empty.
+- Keep the output architectural and contextual only. Do not introduce vulnerability findings, abuse cases, impact claims, or control-gap analysis.
+- Every emitted item must include evidence with chunk_id, files, and rationale.
+- Coverage gaps should be preserved, deduplicated, or clarified, not discarded without reason.
+- Use neutral, descriptive language in names, summaries, and rationales.
+
+JSON schema:
+{{
+  "summary":"one sentence",
+  "system_map":{{
+    "entrypoints":[],
+    "trust_boundaries":[],
+    "identity_and_privilege_zones":[],
+    "data_stores":[],
+    "external_integrations":[],
+    "sensitive_operations":[]
+  }},
+  "coverage_gaps":[
+    {{
+      "category":"entrypoints",
+      "summary":"what remains unclear",
+      "chunk_ids":["chunk-0001"]
+    }}
+  ]
+}}
+
+Deterministic merged system map:
+```json
+{merged_map_json}
+```
+
+Coverage gaps:
+```json
+{coverage_gaps_json}
+```
+"""
+
+
+def build_repository_understanding_validation_prompt(
+    input_json,
+    audit_json,
+    current_output_json,
+    evidence_bundle,
+):
+    """Build the AI prompt for repository-understanding validation and correction."""
+    return f"""Return ONLY JSON.
+Task: validate and, if necessary, minimally correct a repository-understanding output produced by repository_understanding_worker.py.
+
+Goals:
+- use the repository-understanding input JSON as ground truth for valid chunk ids and file paths
+- review the current repository-understanding output against the deterministic audit findings
+- preserve grounded entities and evidence wherever possible
+- remove or repair unsupported, malformed, duplicate, or mis-grounded entries
+- keep the output contextual only, not vulnerability-oriented
+- keep corrections minimal and avoid fully regenerating the map unless the current output is too broken to patch safely
+
+Rules:
+- Do not invent new entities, privileges, integrations, or evidence.
+- Remove or rewrite finding-like, exploit-oriented, or vulnerability-oriented language so the output stays architectural and preparatory only.
+- Every retained item must include evidence with chunk_id, files, and rationale.
+- Evidence files must belong to the referenced chunk in the input JSON.
+- Keep all six system_map categories present, even if empty.
+- Use coverage_gaps for uncertainty instead of guessing.
+- If the current output is acceptable, return status "pass" and corrected_output as null.
+- If you make corrections, return the full corrected repository-understanding payload in corrected_output.
+- Return only JSON matching the schema below.
+
+JSON schema:
+{{
+  "status":"pass",
+  "summary":"one sentence",
+  "issues":[
+    {{
+      "category":"entrypoints",
+      "entity_name":"Admin API",
+      "severity":"medium",
+      "message":"one sentence"
+    }}
+  ],
+  "corrected_output": {{
+    "summary":"one sentence",
+    "system_map": {{
+      "entrypoints": [],
+      "trust_boundaries": [],
+      "identity_and_privilege_zones": [],
+      "data_stores": [],
+      "external_integrations": [],
+      "sensitive_operations": []
+    }},
+    "coverage_gaps":[
+      {{
+        "category":"entrypoints",
+        "summary":"what remains unclear",
+        "chunk_ids":["chunk-0001"]
+      }}
+    ]
+  }}
+}}
+
+Allowed status values:
+- "pass"
+- "corrected"
+- "needs_review"
+
+Allowed severity values:
+- "low"
+- "medium"
+- "high"
+
+Repository-understanding input JSON:
+```json
+{input_json}
+```
+
+Deterministic audit findings:
+```json
+{audit_json}
+```
+
+Current repository-understanding output:
+```json
+{current_output_json}
+```
+
+Evidence file bundle:
+{evidence_bundle}
+"""

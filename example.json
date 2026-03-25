@@ -1,0 +1,17 @@
+{
+    "id":"chunk-0003",
+    "name":"acme-attribute-mapper-plugins",
+    "reason":"attribute mapper....",
+    "total_lines": 538,
+    "file_count": 13, 
+    "files": [
+        {
+            "path":"acme-attribute-mapper-plugins/pom.xml",
+            "lines":83 
+        },
+        {
+            "path":"acme-attribute-mapper-plugins/example.js",
+            "lines":831
+        }
+    ]
+}
