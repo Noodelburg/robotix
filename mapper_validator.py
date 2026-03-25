@@ -21,7 +21,7 @@ from mapper import (
     normalize_text,
 )
 
-DEFAULT_REPORT_FILE = "repository-understanding-validation.json"
+DEFAULT_REPORT_FILE = "system-map-validation.json"
 
 
 def make_issue(message, category="system_map", entity_name=None):
@@ -67,14 +67,19 @@ def merge_issues(*issue_lists):
     )
 
 
-def load_repository_output(output_path: Path):
-    """Load the repository-understanding output to be validated."""
+def parse_metadata_int(value, default=-1):
+    """Parse a non-negative integer metadata field."""
+    return int(value) if str(value).isdigit() else default
+
+
+def load_system_map_output(output_path: Path):
+    """Load the system-map output to be validated."""
     issues = []
 
     if not output_path.exists():
         issues.append(
             make_issue(
-                f"Repository-understanding output is missing: {output_path.name}",
+                f"System-map output is missing: {output_path.name}",
                 category="input",
             )
         )
@@ -85,7 +90,7 @@ def load_repository_output(output_path: Path):
     except Exception as exc:
         issues.append(
             make_issue(
-                f"Repository-understanding output is unreadable: {exc}",
+                f"System-map output is unreadable: {exc}",
                 category="input",
             )
         )
@@ -94,7 +99,7 @@ def load_repository_output(output_path: Path):
     if not isinstance(payload, dict):
         issues.append(
             make_issue(
-                "Repository-understanding output must be a JSON object.",
+                "System-map output must be a JSON object.",
                 category="input",
             )
         )
@@ -104,7 +109,7 @@ def load_repository_output(output_path: Path):
 
 
 def build_known_context(document):
-    """Build lookup tables from the validated repository-understanding input."""
+    """Build lookup tables from the validated mapper input."""
     chunks = document.get("chunks", [])
     known_chunk_ids = {chunk["id"] for chunk in chunks}
     files_by_chunk = {
@@ -150,7 +155,7 @@ def audit_input_metadata(output, context):
             )
         )
 
-    chunk_count = int(input_payload.get("chunk_count", -1)) if str(input_payload.get("chunk_count", "")).isdigit() else -1
+    chunk_count = parse_metadata_int(input_payload.get("chunk_count", -1))
     if chunk_count != len(context["chunks"]):
         issues.append(
             make_issue(
@@ -159,11 +164,7 @@ def audit_input_metadata(output, context):
             )
         )
 
-    source_file_count = (
-        int(input_payload.get("source_file_count", -1))
-        if str(input_payload.get("source_file_count", "")).isdigit()
-        else -1
-    )
+    source_file_count = parse_metadata_int(input_payload.get("source_file_count", -1))
     if source_file_count != context["source_file_count"]:
         issues.append(
             make_issue(
@@ -483,13 +484,13 @@ def audit_coverage_gaps(raw_gaps, context):
 
 
 def audit_mapper_output(output, document):
-    """Run deterministic checks over the current repository-understanding output."""
+    """Run deterministic checks over the current system-map output."""
     issues = []
 
     if not isinstance(output, dict):
         return [
             make_issue(
-                "Repository-understanding output must be a JSON object.",
+                "System-map output must be a JSON object.",
                 category="input",
             )
         ]
@@ -612,7 +613,7 @@ def fallback_report(audit_issues):
     }
 
 
-def canonicalize_candidate_output(candidate_output, document):
+def canonicalize_corrected_output(candidate_output, document):
     """Normalize a candidate corrected output into the worker's canonical shape."""
     context = build_known_context(document)
     normalized_result, problems = normalize_ai_repository_map(
@@ -655,7 +656,7 @@ def normalize_ai_validation_report(report, document, audit_issues):
 
     raw_corrected_output = report.get("corrected_output")
     if isinstance(raw_corrected_output, dict):
-        corrected_output, correction_issues = canonicalize_candidate_output(
+        corrected_output, correction_issues = canonicalize_corrected_output(
             raw_corrected_output,
             document,
         )
@@ -664,7 +665,7 @@ def normalize_ai_validation_report(report, document, audit_issues):
     summary = normalize_text(report.get("summary"))
     if not summary:
         if corrected_output is not None:
-            summary = "AI proposed corrections to the repository-understanding output."
+            summary = "AI proposed corrections to the system-map output."
         elif issues:
             summary = "AI found issues that need review."
         else:
@@ -679,7 +680,7 @@ def normalize_ai_validation_report(report, document, audit_issues):
 
 
 def validate_mapper(input_json_path, output_json_path=None):
-    """Validate and, if possible, correct repository-understanding output in place."""
+    """Validate and, if possible, correct system-map output in place."""
     input_path = Path(input_json_path).resolve()
     output_path = (
         Path(output_json_path).resolve()
@@ -693,7 +694,7 @@ def validate_mapper(input_json_path, output_json_path=None):
         make_issue(message=message, category="input")
         for message in input_messages
     ]
-    current_output, output_issues = load_repository_output(output_path)
+    current_output, output_issues = load_system_map_output(output_path)
     audit_issues = merge_issues(input_issues, output_issues)
 
     if document and current_output is not None:
@@ -751,7 +752,7 @@ def validate_mapper(input_json_path, output_json_path=None):
         final_summary = "Validator found no issues and made no changes."
     elif final_status == "corrected":
         final_summary = (
-            f"Validator corrected the repository-understanding output and resolved "
+            f"Validator corrected the system-map output and resolved "
             f"{len(all_issues)} issue(s)."
         )
     elif corrections_applied:
@@ -779,13 +780,13 @@ def validate_mapper(input_json_path, output_json_path=None):
 def main():
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(
-        description="Validate repository-understanding output generated by mapper.py."
+        description="Validate system-map output generated by mapper.py."
     )
-    parser.add_argument("input_json", help="Path to the repository-understanding input JSON.")
+    parser.add_argument("input_json", help="Path to the mapper input JSON.")
     parser.add_argument(
         "output_json",
         nargs="?",
-        help="Optional path to repository-understanding.json. Defaults next to the input JSON.",
+        help="Optional path to system-map.json. Defaults next to the input JSON.",
     )
     args = parser.parse_args()
     validate_mapper(args.input_json, args.output_json)

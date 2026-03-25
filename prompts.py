@@ -112,11 +112,22 @@ Current chunk JSON files:
 """
 
 
-def build_mapper_chunk_prompt(chunk_json, chunk_contents):
-    """Build the AI prompt for chunk-local repository understanding."""
+def build_mapper_subtask_prompt(
+    guide_path,
+    guide_focus,
+    guide_markdown,
+    chunk_json,
+    chunk_contents,
+):
+    """Build the AI prompt for a guide-driven mapper subtask."""
     return f"""Return ONLY JSON.
-Task: build a chunk-local repository understanding map for downstream review context.
-Focus ONLY on these categories:
+Task: use the provided OWASP WSTG information-gathering guide as the strategy for one repository-mapping subtask.
+This subtask should map only the repository context that is supported by the guide and the provided chunk contents.
+
+Primary focus categories for this guide:
+{guide_focus}
+
+Available categories:
 - entrypoints
 - trust_boundaries
 - identity_and_privilege_zones
@@ -125,13 +136,16 @@ Focus ONLY on these categories:
 - sensitive_operations
 
 Rules:
+- Treat the WSTG guide as a mapping methodology, not as an instruction to report findings.
 - Only include entities supported by the provided chunk metadata and file contents.
 - Prefer grounded, high-signal entities over speculative guesses.
-- This worker creates architectural context only. It must not identify vulnerabilities, findings, attack paths, missing controls, insecure behavior, or exploitability.
+- This mapper creates architectural context only. It must not identify vulnerabilities, findings, attack paths, missing controls, insecure behavior, or exploitability.
 - Describe what exists and how it is connected, not whether it is safe or unsafe.
 - For sensitive_operations, describe privileged or high-impact operations neutrally; do not explain how they could be abused.
 - Every emitted item must include evidence with chunk_id, files, and rationale.
 - Evidence files must be repo-relative paths from the chunk metadata.
+- Use the guide's strategy to decide what to look for in the code. Adapt web-testing instructions into a source-based mapping lens.
+- If the guide is only partially applicable to source-based analysis, return whatever grounded context it supports and use coverage_gaps for the rest.
 - If the chunk does not support an item in a category, return an empty list for that category.
 - You may return coverage gaps for areas that appear relevant but remain unclear from this chunk alone.
 - Do not invent line numbers, services, data stores, privileges, or integrations not visible in the material.
@@ -241,6 +255,14 @@ JSON schema:
   ]
 }}
 
+WSTG guide path:
+`{guide_path}`
+
+WSTG guide excerpt:
+```md
+{guide_markdown}
+```
+
 Chunk metadata:
 ```json
 {chunk_json}
@@ -307,13 +329,13 @@ def build_mapper_validation_prompt(
     current_output_json,
     evidence_bundle,
 ):
-    """Build the AI prompt for repository-understanding validation and correction."""
+    """Build the AI prompt for system-map validation and correction."""
     return f"""Return ONLY JSON.
-Task: validate and, if necessary, minimally correct a repository-understanding output produced by mapper.py.
+Task: validate and, if necessary, minimally correct a system-map output produced by mapper.py.
 
 Goals:
-- use the repository-understanding input JSON as ground truth for valid chunk ids and file paths
-- review the current repository-understanding output against the deterministic audit findings
+- use the mapper input JSON as ground truth for valid chunk ids and file paths
+- review the current system-map output against the deterministic audit findings
 - preserve grounded entities and evidence wherever possible
 - remove or repair unsupported, malformed, duplicate, or mis-grounded entries
 - keep the output contextual only, not vulnerability-oriented
@@ -327,7 +349,7 @@ Rules:
 - Keep all six system_map categories present, even if empty.
 - Use coverage_gaps for uncertainty instead of guessing.
 - If the current output is acceptable, return status "pass" and corrected_output as null.
-- If you make corrections, return the full corrected repository-understanding payload in corrected_output.
+- If you make corrections, return the full corrected system-map payload in corrected_output.
 - Return only JSON matching the schema below.
 
 JSON schema:
@@ -338,7 +360,6 @@ JSON schema:
     {{
       "category":"entrypoints",
       "entity_name":"Admin API",
-      "severity":"medium",
       "message":"one sentence"
     }}
   ],
@@ -367,12 +388,7 @@ Allowed status values:
 - "corrected"
 - "needs_review"
 
-Allowed severity values:
-- "low"
-- "medium"
-- "high"
-
-Repository-understanding input JSON:
+Mapper input JSON:
 ```json
 {input_json}
 ```
@@ -382,7 +398,7 @@ Deterministic audit findings:
 {audit_json}
 ```
 
-Current repository-understanding output:
+Current system-map output:
 ```json
 {current_output_json}
 ```

@@ -4,19 +4,27 @@
 import argparse
 import json
 import logging
+import os
 import re
 import shlex
+import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from prompts import (
-    build_mapper_chunk_prompt,
     build_mapper_merge_prompt,
+    build_mapper_subtask_prompt,
 )
 
 
 CMD = "copilot -p"
-DEFAULT_OUTPUT_FILE = "repository-understanding.json"
+FLEET_CMD = "/fleet"
+DEFAULT_OUTPUT_FILE = "system-map.json"
+WSTG_GUIDE_DIR = Path(__file__).resolve().parent / "wstg" / "01-Information_Gathering"
+WSTG_GUIDE_GLOB = "[0-9][0-9]-*.md"
+DEFAULT_SUBTASK_WORKERS = 4
+JSON_DECODER = json.JSONDecoder()
 CATEGORIES = (
     "entrypoints",
     "trust_boundaries",
@@ -98,12 +106,57 @@ FINDING_LIKE_PATTERNS = (
     re.compile(r"\bunsanitized\b", re.I),
     re.compile(r"\bunvalidated\b", re.I),
 )
+GUIDE_FOCUS_HINTS = {
+    "01-Conduct_Search_Engine_Discovery_Reconnaissance_for_Information_Leakage.md": (
+        "entrypoints",
+        "external_integrations",
+    ),
+    "02-Fingerprint_Web_Server.md": (
+        "trust_boundaries",
+        "external_integrations",
+    ),
+    "03-Review_Webserver_Metafiles_for_Information_Leakage.md": (
+        "entrypoints",
+        "external_integrations",
+    ),
+    "04-Attack_Surface_Identification.md": (
+        "entrypoints",
+        "trust_boundaries",
+        "external_integrations",
+        "sensitive_operations",
+    ),
+    "05-Review_Web_Page_Content_for_Information_Leakage.md": (
+        "entrypoints",
+        "external_integrations",
+    ),
+    "06-Identify_Application_Entry_Points.md": ("entrypoints",),
+    "07-Map_Execution_Paths_Through_Application.md": (
+        "trust_boundaries",
+        "sensitive_operations",
+    ),
+    "08-Fingerprint_Web_Application_Framework.md": (
+        "trust_boundaries",
+        "data_stores",
+        "external_integrations",
+    ),
+    "09-Fingerprint_Web_Application.md": (
+        "trust_boundaries",
+        "data_stores",
+        "external_integrations",
+    ),
+    "10-Map_Application_Architecture.md": (
+        "trust_boundaries",
+        "identity_and_privilege_zones",
+        "data_stores",
+        "external_integrations",
+    ),
+}
 
 LOGGER = logging.getLogger(__name__)
 
 
 def make_empty_system_map():
-    """Return an empty repository-understanding map."""
+    """Return an empty system map."""
     return {category: [] for category in CATEGORIES}
 
 
@@ -270,19 +323,45 @@ def make_gap(category, summary, chunk_ids):
     }
 
 
-def call_ai(prompt: str):
+def make_fragment(summary="", system_map=None, coverage_gaps=None):
+    """Build a normalized fragment payload."""
+    return {
+        "summary": normalize_text(summary),
+        "system_map": system_map or make_empty_system_map(),
+        "coverage_gaps": dedupe_coverage_gaps(coverage_gaps or []),
+    }
+
+
+def extract_json_object(text):
+    """Extract the first JSON object from model output."""
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+
+        try:
+            candidate, _ = JSON_DECODER.raw_decode(text[index:])
+        except ValueError:
+            continue
+
+        if isinstance(candidate, dict):
+            return candidate
+
+    return None
+
+
+def call_ai(prompt: str, cmd=CMD):
     """Call Copilot CLI and return parsed JSON output."""
     try:
-        cmd = shlex.split(CMD)
-        result = subprocess.run(cmd + [prompt], capture_output=True, text=True)
+        cmd_parts = shlex.split(cmd)
+        result = subprocess.run(cmd_parts + [prompt], capture_output=True, text=True)
         output = (result.stdout or result.stderr).strip()
-        match = re.search(r"\{.*\}", output, re.S)
+        payload = extract_json_object(output)
 
-        if not match:
+        if payload is None:
             LOGGER.error("No JSON in AI response:\n%s", output)
             return None
 
-        return json.loads(match.group(0))
+        return payload
 
     except Exception as exc:
         LOGGER.error("call_ai failed: %s", exc)
@@ -379,7 +458,7 @@ def resolve_root_path(root_value, input_json_path: Path):
 
 
 def load_repository_input(input_json_path):
-    """Load and validate the repository-understanding input wrapper."""
+    """Load and validate the mapper input wrapper."""
     issues = []
 
     try:
@@ -454,6 +533,230 @@ def build_chunk_contents(root_path: Path, chunk):
         sections.append("=== FILE END ===")
 
     return "\n".join(sections), readable_paths, issues
+
+
+def trim_guide_markdown(markdown):
+    """Keep the WSTG strategy sections that are useful for source-based mapping."""
+    sections = []
+
+    for line in markdown.splitlines():
+        if line.strip() in {"## Tools", "## References"}:
+            break
+        sections.append(line)
+
+    trimmed = "\n".join(sections).strip()
+    return trimmed or markdown.strip()
+
+
+def load_mapping_guides():
+    """Load the WSTG information-gathering guides that drive mapper subtasks."""
+    guide_paths = sorted(WSTG_GUIDE_DIR.glob(WSTG_GUIDE_GLOB))
+    issues = []
+    guides = []
+
+    if not guide_paths:
+        issues.append(
+            f"No WSTG information-gathering guides were found in {WSTG_GUIDE_DIR}."
+        )
+        return guides, issues
+
+    workspace_root = Path(__file__).resolve().parent
+
+    for guide_path in guide_paths:
+        try:
+            markdown = trim_guide_markdown(
+                guide_path.read_text(encoding="utf-8", errors="ignore")
+            )
+        except OSError as exc:
+            issues.append(f"Failed to read mapper guide {guide_path.name}: {exc}")
+            continue
+
+        focus_categories = list(GUIDE_FOCUS_HINTS.get(guide_path.name, CATEGORIES))
+        relative_path = str(guide_path.relative_to(workspace_root))
+        guides.append(
+            {
+                "name": guide_path.name,
+                "relative_path": relative_path,
+                "focus_text": "\n".join(f"- {category}" for category in focus_categories),
+                "markdown": markdown,
+            }
+        )
+
+    return guides, issues
+
+
+def resolve_subtask_cmd():
+    """Prefer /fleet for mapper subtasks when it is available."""
+    if Path(FLEET_CMD).exists() and os.access(FLEET_CMD, os.X_OK):
+        return FLEET_CMD
+
+    fleet_binary = shutil.which("fleet")
+    if fleet_binary:
+        return fleet_binary
+
+    return CMD
+
+
+def determine_subtask_workers(task_count):
+    """Determine mapper subtask parallelism."""
+    configured = parse_int(os.environ.get("MAPPER_MAX_PARALLEL"), 0)
+
+    if configured > 0:
+        return max(1, min(configured, task_count))
+
+    return max(1, min(DEFAULT_SUBTASK_WORKERS, task_count))
+
+
+def build_chunk_materials(root_path: Path, chunks):
+    """Read chunk contents once so guide-driven subtasks can reuse them."""
+    materials = []
+    problems = []
+    coverage_gaps = []
+
+    for chunk in chunks:
+        chunk_contents, readable_paths, read_issues = build_chunk_contents(root_path, chunk)
+        problems.extend(read_issues)
+
+        if read_issues:
+            coverage_gaps.append(
+                make_gap(
+                    "input",
+                    f"Chunk {chunk['id']} had unreadable or missing files.",
+                    [chunk["id"]],
+                )
+            )
+
+        if not readable_paths:
+            problems.append(f"Chunk {chunk['id']} had no readable files to analyze.")
+            coverage_gaps.append(
+                make_gap(
+                    "system_map",
+                    f"Chunk {chunk['id']} could not be mapped because no readable files were available.",
+                    [chunk["id"]],
+                )
+            )
+            continue
+
+        materials.append(
+            {
+                "chunk": chunk,
+                "chunk_contents": chunk_contents,
+                "readable_paths": readable_paths,
+            }
+        )
+
+    return materials, problems, coverage_gaps
+
+
+def collect_subtask_fragment(task, ai_cmd):
+    """Run one WSTG-guided mapper subtask against one chunk."""
+    guide = task["guide"]
+    chunk = task["chunk"]
+    readable_paths = task["readable_paths"]
+
+    prompt = build_mapper_subtask_prompt(
+        guide_path=guide["relative_path"],
+        guide_focus=guide["focus_text"],
+        guide_markdown=guide["markdown"],
+        chunk_json=json.dumps(chunk, indent=2),
+        chunk_contents=task["chunk_contents"],
+    )
+    raw_result = call_ai(prompt, cmd=ai_cmd)
+    normalized_result, normalization_problems = normalize_ai_repository_map(
+        raw_result=raw_result,
+        allowed_chunk_ids={chunk["id"]},
+        allowed_paths=set(readable_paths),
+        fallback_chunk_ids=[chunk["id"]],
+        default_chunk_id=chunk["id"],
+    )
+    problems = [
+        f"{guide['relative_path']} for chunk {chunk['id']}: {problem}"
+        for problem in normalization_problems
+    ]
+    coverage_gaps = list(normalized_result["coverage_gaps"])
+
+    if normalization_problems:
+        coverage_gaps.append(
+            make_gap(
+                "system_map",
+                f"Guide {guide['name']} produced incomplete mapping output for chunk {chunk['id']}.",
+                [chunk["id"]],
+            )
+        )
+
+    return make_fragment(
+        summary=normalized_result["summary"],
+        system_map=normalized_result["system_map"],
+        coverage_gaps=coverage_gaps,
+    ), problems
+
+
+def collect_guided_fragments(root_path: Path, chunks):
+    """Run WSTG-guided mapper subtasks across the repository in parallel."""
+    guides, guide_issues = load_mapping_guides()
+    materials, material_problems, coverage_gaps = build_chunk_materials(root_path, chunks)
+    problems = list(guide_issues) + list(material_problems)
+
+    tasks = [
+        {
+            "guide": guide,
+            "chunk": material["chunk"],
+            "chunk_contents": material["chunk_contents"],
+            "readable_paths": material["readable_paths"],
+        }
+        for guide in guides
+        for material in materials
+    ]
+
+    if guides and not tasks:
+        problems.append("Mapper could not create any WSTG-guided subtasks.")
+
+    if guide_issues:
+        coverage_gaps.append(
+            make_gap(
+                "system_map",
+                "One or more WSTG mapper guides were unavailable.",
+                [chunk["id"] for chunk in chunks],
+            )
+        )
+
+    if not tasks:
+        return [], problems, dedupe_coverage_gaps(coverage_gaps)
+
+    ai_cmd = resolve_subtask_cmd()
+    worker_count = determine_subtask_workers(len(tasks))
+    fragments = []
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_task = {
+            executor.submit(collect_subtask_fragment, task, ai_cmd): task
+            for task in tasks
+        }
+
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+
+            try:
+                fragment, task_problems = future.result()
+            except Exception as exc:
+                chunk_id = task["chunk"]["id"]
+                guide_name = task["guide"]["name"]
+                problems.append(
+                    f"Guide {guide_name} failed for chunk {chunk_id}: {exc}"
+                )
+                coverage_gaps.append(
+                    make_gap(
+                        "system_map",
+                        f"Guide {guide_name} could not be completed for chunk {chunk_id}.",
+                        [chunk_id],
+                    )
+                )
+                continue
+
+            fragments.append(fragment)
+            problems.extend(task_problems)
+
+    return fragments, problems, dedupe_coverage_gaps(coverage_gaps)
 
 
 def normalize_evidence(
@@ -748,61 +1051,6 @@ def merge_system_maps(fragments):
     )
 
 
-def collect_chunk_fragment(root_path: Path, chunk):
-    """Generate a normalized chunk-level repository understanding fragment."""
-    problems = []
-    coverage_gaps = []
-    chunk_contents, readable_paths, read_issues = build_chunk_contents(root_path, chunk)
-    problems.extend(read_issues)
-
-    if read_issues:
-        coverage_gaps.append(
-            make_gap(
-                "input",
-                f"Chunk {chunk['id']} had unreadable or missing files.",
-                [chunk["id"]],
-            )
-        )
-
-    if not readable_paths:
-        problems.append(f"Chunk {chunk['id']} had no readable files to analyze.")
-        return {
-            "summary": "",
-            "system_map": make_empty_system_map(),
-            "coverage_gaps": dedupe_coverage_gaps(coverage_gaps),
-        }, problems
-
-    prompt = build_mapper_chunk_prompt(
-        chunk_json=json.dumps(chunk, indent=2),
-        chunk_contents=chunk_contents,
-    )
-    raw_result = call_ai(prompt)
-    normalized_result, normalization_problems = normalize_ai_repository_map(
-        raw_result=raw_result,
-        allowed_chunk_ids={chunk["id"]},
-        allowed_paths=set(readable_paths),
-        fallback_chunk_ids=[chunk["id"]],
-        default_chunk_id=chunk["id"],
-    )
-    problems.extend(normalization_problems)
-    coverage_gaps.extend(normalized_result["coverage_gaps"])
-
-    if normalization_problems:
-        coverage_gaps.append(
-            make_gap(
-                "system_map",
-                f"Chunk {chunk['id']} produced incomplete AI output and may need review.",
-                [chunk["id"]],
-            )
-        )
-
-    return {
-        "summary": normalized_result["summary"],
-        "system_map": normalized_result["system_map"],
-        "coverage_gaps": dedupe_coverage_gaps(coverage_gaps),
-    }, problems
-
-
 def synthesize_repository_map(merged_map, coverage_gaps, allowed_chunk_ids, allowed_paths):
     """Run the final synthesis pass over the deterministic merged map."""
     prompt = build_mapper_merge_prompt(
@@ -818,27 +1066,26 @@ def synthesize_repository_map(merged_map, coverage_gaps, allowed_chunk_ids, allo
     )
 
     if problems:
-        return {
-            "summary": "",
-            "system_map": merged_map,
-            "coverage_gaps": coverage_gaps,
-        }, problems
+        return make_fragment(
+            system_map=merged_map,
+            coverage_gaps=coverage_gaps,
+        ), problems
 
     final_coverage_gaps = dedupe_coverage_gaps(
         coverage_gaps + normalized_result["coverage_gaps"]
     )
-    return {
-        "summary": normalized_result["summary"],
-        "system_map": normalized_result["system_map"],
-        "coverage_gaps": final_coverage_gaps,
-    }, []
+    return make_fragment(
+        summary=normalized_result["summary"],
+        system_map=normalized_result["system_map"],
+        coverage_gaps=final_coverage_gaps,
+    ), []
 
 
 def build_final_summary(chunk_count, coverage_gaps, problems, synthesized_summary=""):
     """Build the final top-level summary string."""
     if problems:
         return (
-            f"Repository understanding completed with {len(problems)} issue(s) "
+            f"System map generation completed with {len(problems)} issue(s) "
             f"across {chunk_count} chunk(s)."
         )
 
@@ -847,15 +1094,15 @@ def build_final_summary(chunk_count, coverage_gaps, problems, synthesized_summar
 
     if coverage_gaps:
         return (
-            f"Repository understanding completed with {len(coverage_gaps)} coverage gap(s) "
+            f"System map generation completed with {len(coverage_gaps)} coverage gap(s) "
             f"across {chunk_count} chunk(s)."
         )
 
-    return f"Repository understanding completed successfully across {chunk_count} chunk(s)."
+    return f"System map generation completed successfully across {chunk_count} chunk(s)."
 
 
 def build_output(status, summary, root_path, chunks, system_map, coverage_gaps):
-    """Assemble the final repository-understanding output payload."""
+    """Assemble the final system-map output payload."""
     unique_paths = sorted(
         {
             file_info["path"]
@@ -889,6 +1136,7 @@ def run_mapper(input_json_path, output_json_path=None):
     document, input_issues = load_repository_input(input_path)
     root_path = document.get("root_path") if document else None
     chunks = document.get("chunks", []) if document else []
+    chunk_ids = [chunk["id"] for chunk in chunks]
     problems = list(input_issues)
     coverage_gaps = []
 
@@ -896,8 +1144,8 @@ def run_mapper(input_json_path, output_json_path=None):
         coverage_gaps.append(
             make_gap(
                 "input",
-                "The repository-understanding input document had validation issues.",
-                [chunk["id"] for chunk in chunks],
+                "The mapper input document had validation issues.",
+                chunk_ids,
             )
         )
 
@@ -909,11 +1157,17 @@ def run_mapper(input_json_path, output_json_path=None):
     fragments = []
 
     if root_path and root_path.exists():
-        for chunk in chunks:
-            fragment, fragment_problems = collect_chunk_fragment(root_path, chunk)
-            fragments.append(fragment)
-            problems.extend(fragment_problems)
-            coverage_gaps.extend(fragment.get("coverage_gaps", []))
+        fragments, fragment_problems, fragment_gaps = collect_guided_fragments(
+            root_path,
+            chunks,
+        )
+        problems.extend(fragment_problems)
+        coverage_gaps.extend(fragment_gaps)
+        coverage_gaps.extend(
+            gap
+            for fragment in fragments
+            for gap in fragment.get("coverage_gaps", [])
+        )
 
     merged_map, merged_gaps = merge_system_maps(fragments)
     coverage_gaps.extend(merged_gaps)
@@ -948,6 +1202,7 @@ def run_mapper(input_json_path, output_json_path=None):
                 )
             )
 
+    coverage_gaps = dedupe_coverage_gaps(coverage_gaps)
     status = "needs_review" if problems else "pass"
     summary = build_final_summary(
         chunk_count=len(chunks),
@@ -970,13 +1225,13 @@ def run_mapper(input_json_path, output_json_path=None):
 def main():
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(
-        description="Generate a repository-understanding system map from chunk JSON input."
+        description="Generate a system map from chunk JSON input."
     )
-    parser.add_argument("input_json", help="Path to the repository-understanding input JSON file.")
+    parser.add_argument("input_json", help="Path to the mapper input JSON file.")
     parser.add_argument(
         "output_json",
         nargs="?",
-        help="Optional explicit output path. Defaults to repository-understanding.json next to the input file.",
+        help="Optional explicit output path. Defaults to system-map.json next to the input file.",
     )
     args = parser.parse_args()
     run_mapper(args.input_json, args.output_json)
